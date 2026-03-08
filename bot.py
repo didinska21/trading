@@ -593,7 +593,7 @@ async def auto_signal_loop(uid: int, app):
                         )
                         mode_emoji = {"high_risk":"🔴","medium_risk":"🟡","low_risk":"🟢"}.get(mode,"📊")
                         notif = (
-                            f"🚨 *AUTO SIGNAL ALERT\\!*\n"
+                            f"🚨 *AUTO SIGNAL ALERT!*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"⭐ Score Setup : *{score}/10*\n"
                             f"📌 Pair        : *{symbol}*\n"
@@ -601,7 +601,7 @@ async def auto_signal_loop(uid: int, app):
                             f"💡 Alasan      : {alasan}\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                         )
-                        await app.bot.send_message(uid, notif, parse_mode="MarkdownV2")
+                        await app.bot.send_message(uid, notif, parse_mode="Markdown")
                         await app.bot.send_message(uid, sinyal, parse_mode="Markdown")
 
                         # Update last_sent
@@ -681,22 +681,22 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     auto_on = AUTO_USERS.get(u.id, {}).get("active", False)
     await update.message.reply_text(
         f"🤖 *FUTURES TRADING BOT*\n\n"
-        f"Halo *{u.first_name}*\\!\n\n"
-        f"🔴 *HIGH RISK* \\($1\\-$10\\)\n"
-        f"└ SL \\= Liquidation Price \\(dipatenkan\\)\n"
-        f"└ Leverage 20x\\-50x, scalping 1m\\-5m\n\n"
-        f"🟡 *MEDIUM RISK* \\($11\\-$100\\)\n"
-        f"└ Risk 2\\-5% per trade\n"
-        f"└ Leverage 5x\\-20x, scalping 5m\\-15m\n\n"
-        f"🟢 *LOW RISK* \\($100\\+\\)\n"
-        f"└ Risk max 1\\-2% per trade\n"
-        f"└ Leverage 2x\\-10x, R:R min 1:3\n\n"
+        f"Halo *{u.first_name}*!\n\n"
+        f"🔴 *HIGH RISK* ($1-$10)\n"
+        f"└ SL = Liquidation Price (dipatenkan)\n"
+        f"└ Leverage 20x-50x, scalping 1m-5m\n\n"
+        f"🟡 *MEDIUM RISK* ($11-$100)\n"
+        f"└ Risk 2-5% per trade\n"
+        f"└ Leverage 5x-20x, scalping 5m-15m\n\n"
+        f"🟢 *LOW RISK* ($100+)\n"
+        f"└ Risk max 1-2% per trade\n"
+        f"└ Leverage 2x-10x, R:R min 1:3\n\n"
         f"🤖 *AUTO SIGNAL*\n"
         f"└ Scan 24 jam, notif otomatis setup bagus\n\n"
-        f"📡 Data  : *Binance Futures API \\(real\\-time\\)*\n"
-        f"🧠 AI    : *Groq llama\\-3\\.3\\-70b \\(GRATIS\\)*\n\n"
-        f"⚠️ Hanya alat bantu analisis, bukan jaminan profit\\.",
-        parse_mode="MarkdownV2", reply_markup=main_kb(auto_on)
+        f"📡 Data  : *Binance Futures API (real-time)*\n"
+        f"🧠 AI    : *Groq llama-3.3-70b (GRATIS)*\n\n"
+        f"⚠️ Hanya alat bantu analisis, bukan jaminan profit.",
+        parse_mode="Markdown", reply_markup=main_kb(auto_on)
     )
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -733,14 +733,14 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if txt in MODE_BTN:
         key, label, rng = MODE_BTN[txt]
         s.update({"mode": key, "pair": None, "modal": None, "history": [], "state": "selecting_pair"})
-        sl_note = "\n⚠️ *SL \\= LIQUIDATION PRICE \\(dipatenkan\\)*" if key == "high_risk" else ""
+        sl_note = "\n⚠️ *SL = LIQUIDATION PRICE (dipatenkan)*" if key == "high_risk" else ""
         wait = await update.message.reply_text("⏳ Mengambil top pairs dari Binance...")
         ptxt, plst = await top_pairs_msg(20)
         s["pairs"] = plst
         await wait.delete()
         await update.message.reply_text(
             f"*{label}* dipilih — Modal {rng}{sl_note}\n\nPilih pair:",
-            parse_mode="MarkdownV2", reply_markup=pairs_kb(plst)
+            parse_mode="Markdown", reply_markup=pairs_kb(plst)
         )
         return
 
@@ -774,11 +774,11 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             modal = s.get("modal")
             if not mode or not modal:
                 await update.message.reply_text(
-                    "⚠️ *Pilih mode & set modal dulu sebelum aktifkan Auto Signal\\!*\n\n"
-                    "Caranya:\n1\\. Pilih mode \\(High/Medium/Low Risk\\)\n"
-                    "2\\. Pilih pair\n3\\. Masukkan modal\n"
-                    "4\\. Setelah sinyal pertama keluar → Auto Signal bisa diaktifkan",
-                    parse_mode="MarkdownV2", reply_markup=main_kb(False))
+                    "⚠️ *Pilih mode & set modal dulu sebelum aktifkan Auto Signal!*\n\n"
+                    "Caranya:\n1. Pilih mode (High/Medium/Low Risk)\n"
+                    "2. Pilih pair\n3. Masukkan modal\n"
+                    "4. Setelah sinyal pertama keluar → Auto Signal bisa diaktifkan",
+                    parse_mode="Markdown", reply_markup=main_kb(False))
                 return
 
             # Batalkan task lama kalau ada
@@ -794,15 +794,15 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             }
             mode_label = {"high_risk":"🔴 HIGH RISK","medium_risk":"🟡 MEDIUM RISK","low_risk":"🟢 LOW RISK"}.get(mode, mode)
             await update.message.reply_text(
-                f"✅ *AUTO SIGNAL AKTIF\\!*\n\n"
+                f"✅ *AUTO SIGNAL AKTIF!*\n\n"
                 f"🤖 Mode     : {mode_label}\n"
-                f"💰 Modal    : \\${modal}\n"
+                f"💰 Modal    : ${modal}\n"
                 f"🔍 Scan     : Setiap {SCAN_INTERVAL_MIN} menit\n"
                 f"⭐ Min Score: {MIN_SCORE}/10\n"
                 f"⏱ Cooldown : {COOLDOWN_MIN} menit/pair\n\n"
-                f"Bot akan scan top {SCAN_TOP_N} pairs Binance otomatis\\.\n"
-                f"Notif masuk kalau ada setup score ≥ {MIN_SCORE}/10\\! 🚨",
-                parse_mode="MarkdownV2", reply_markup=main_kb(True))
+                f"Bot akan scan top {SCAN_TOP_N} pairs Binance otomatis.\n"
+                f"Notif masuk kalau ada setup score ≥ {MIN_SCORE}/10! 🚨",
+                parse_mode="Markdown", reply_markup=main_kb(True))
 
         else:  # Nonaktifkan
             task = auto_info.get("task")
@@ -810,7 +810,7 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if u.id in AUTO_USERS: AUTO_USERS[u.id]["active"] = False
             await update.message.reply_text(
                 "⭕ *AUTO SIGNAL DINONAKTIFKAN*\n\nBot berhenti scan otomatis.",
-                parse_mode="MarkdownV2", reply_markup=main_kb(False))
+                parse_mode="Markdown", reply_markup=main_kb(False))
         return
 
     # ── AUTO SIGNAL SETTINGS ─────────────────────────────────
@@ -852,8 +852,8 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["pair"] = pair; s["state"] = "asking_modal"
         rng = {"high_risk":"$1–$10","medium_risk":"$11–$100","low_risk":"$100+"}.get(s["mode"],"")
         await update.message.reply_text(
-            f"✅ Pair: *{pair}*\n\nMasukkan modal \\({rng}\\):\nContoh: `50`",
-            parse_mode="MarkdownV2")
+            f"✅ Pair: *{pair}*\n\nMasukkan modal ({rng}):\nContoh: `50`",
+            parse_mode="Markdown")
         return
 
     # State: asking modal
@@ -870,15 +870,15 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ok:
             rng = {"high_risk":"$1–$10","medium_risk":"$11–$100","low_risk":"di atas $100"}[mode]
             await update.message.reply_text(
-                f"⚠️ Mode ini untuk modal *{rng}*\\. Masukkan ulang:",
-                parse_mode="MarkdownV2"); return
+                f"⚠️ Mode ini untuk modal *{rng}*. Masukkan ulang:",
+                parse_mode="Markdown"); return
         s["modal"] = modal; s["state"] = "chatting"; s["history"] = []
         ml = {"high_risk":"🔴 HIGH RISK","medium_risk":"🟡 MEDIUM RISK","low_risk":"🟢 LOW RISK"}[mode]
         await update.message.reply_text(
-            f"✅ *Setup siap\\!*\n"
-            f"Mode: {ml} \\| Pair: `{s['pair']}` \\| Modal: `${modal}`\n\n"
-            f"⏳ Mengambil data live & generating sinyal\\.\\.\\.",
-            parse_mode="MarkdownV2")
+            f"✅ *Setup siap!*\n"
+            f"Mode: {ml} | Pair: `{s['pair']}` | Modal: `${modal}`\n\n"
+            f"⏳ Mengambil data live & generating sinyal...",
+            parse_mode="Markdown")
         try:
             sig = await gen_signal(mode, s["pair"], modal,
                 f"Berikan sinyal trading futures {s['pair']} lengkap berdasarkan semua data live.",
@@ -922,8 +922,8 @@ async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pair = data[5:]; s["pair"] = pair; s["state"] = "asking_modal"
         rng = {"high_risk":"$1–$10","medium_risk":"$11–$100","low_risk":"di atas $100"}.get(s["mode"],"")
         await q.edit_message_text(
-            f"✅ Pair: *{pair}*\n\nMasukkan modal \\({rng}\\):\nContoh: `50`",
-            parse_mode="MarkdownV2")
+            f"✅ Pair: *{pair}*\n\nMasukkan modal ({rng}):\nContoh: `50`",
+            parse_mode="Markdown")
         return
 
     # ── Auto Signal Settings callbacks ───────────────────────
