@@ -652,7 +652,7 @@ def main_kb(auto_active=False):
         [KeyboardButton("🟢 LOW RISK ($100+)"),     KeyboardButton("📊 Top Pairs Live")],
         [KeyboardButton(auto_label),                KeyboardButton("📈 Analisis Pasar")],
         [KeyboardButton("⚙️ Auto Signal Settings"), KeyboardButton("❓ Bantuan")],
-    ], resize_keyboard=True, persistent=True,
+    ], resize_keyboard=True,
        input_field_placeholder="Pilih mode atau ketik pertanyaan...")
 
 def pairs_kb(pair_list: list, page=0, per=9):
