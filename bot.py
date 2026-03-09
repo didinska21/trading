@@ -582,7 +582,7 @@ async def collect(exchange: str, symbol: str, mode: str) -> str:
         rsi_lbl = "OVERSOLD 🟢" if r14<30 else "OVERBOUGHT 🔴" if r14>70 else "NETRAL ⚪"
         mac_lbl = "BULLISH 🟢" if hist>0 else "BEARISH 🔴"
         ema_lbl = "BULLISH KUAT 🟢" if e9>e21>e50 else "BEARISH KUAT 🔴" if e9<e21<e50 else "MIXED ⚪"
-        vol_lbl = f"SPIKE 🔥 {vratio:.1f}x" if vratio>1.5 else f"Normal {vratio:.1f}x" if vratio>=0.8 else f"SEPI {vratio:.1f}x"
+        vol_lbl = f"SPIKE 🔥 {vratio:.1f}x avg" if vratio>1.5 else f"Normal {vratio:.1f}x avg" if vratio>=0.8 else f"SEPI {vratio:.1f}x avg"
 
         L += [
             f"── {tf_label.upper()} ────────────────",
@@ -593,7 +593,7 @@ async def collect(exchange: str, symbol: str, mode: str) -> str:
             f"BB U/M/L      : {fmt(bbu)} / {fmt(bbm)} / {fmt(bbl)}",
             f"Resistance    : ${res:.{dec}f}",
             f"Support       : ${sup:.{dec}f}",
-            f"Volume        : {vol_lbl} avg",
+            f"Volume        : {vol_lbl}",
             f"5 Candle      : {candles}\n",
         ]
     return "\n".join(L)
