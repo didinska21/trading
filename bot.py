@@ -37,8 +37,54 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════════════════════
-AI    = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL = "llama-3.3-70b-versatile"
+
+# ── Groq Key Rotator ─────────────────────────────────────────
+# Dukung sampai 10 key: GROQ_API_KEY_1 … GROQ_API_KEY_10
+# Juga baca GROQ_API_KEY sebagai fallback key tunggal
+_groq_keys: list[str] = []
+for i in range(1, 11):
+    k = os.getenv(f"GROQ_API_KEY_{i}")
+    if k: _groq_keys.append(k)
+if not _groq_keys:
+    single = os.getenv("GROQ_API_KEY")
+    if single: _groq_keys.append(single)
+
+if not _groq_keys:
+    raise RuntimeError("❌ Tidak ada GROQ_API_KEY ditemukan di .env!")
+
+_groq_clients = [Groq(api_key=k) for k in _groq_keys]
+_current_key_idx = 0
+
+def _get_groq() -> Groq:
+    return _groq_clients[_current_key_idx]
+
+def _rotate_key(reason: str = ""):
+    global _current_key_idx
+    prev = _current_key_idx
+    _current_key_idx = (_current_key_idx + 1) % len(_groq_clients)
+    logger.warning(f"[KEY ROTATE] key #{prev+1} → #{_current_key_idx+1} | alasan: {reason}")
+
+def _call_groq(messages, max_tokens=2000, temperature=0.7):
+    """Panggil Groq API dengan auto-rotate jika 429."""
+    import groq as groq_lib
+    tried = 0
+    total = len(_groq_clients)
+    while tried < total:
+        client = _get_groq()
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL, messages=messages,
+                max_tokens=max_tokens, temperature=temperature,
+            )
+            return resp.choices[0].message.content
+        except groq_lib.RateLimitError as e:
+            tried += 1
+            _rotate_key(f"429 rate limit — {str(e)[:60]}")
+            if tried >= total:
+                raise Exception(f"Semua {total} API key Groq kena rate limit! Coba lagi nanti.")
+        except Exception as e:
+            raise
 
 SCAN_INTERVAL_MIN = 15
 SCAN_TOP_N        = 10
@@ -867,8 +913,7 @@ async def gen_signal(exchange: str, mode: str, symbol: str, modal: float, user_m
         f"Gunakan harga dan angka NYATA dari data di atas. Hitung TP/SL dari harga terkini."
     )
     msgs = [{"role":"system","content":PROMPTS[mode]}] + history[-6:] + [{"role":"user","content":prompt}]
-    resp = AI.chat.completions.create(model=MODEL, messages=msgs, max_tokens=2000, temperature=0.7)
-    answer = resp.choices[0].message.content
+    answer = await asyncio.to_thread(_call_groq, msgs, 2000, 0.7)
     history.append({"role":"user","content":f"[{symbol}] {user_msg}"})
     history.append({"role":"assistant","content":answer})
     return answer
@@ -876,21 +921,17 @@ async def gen_signal(exchange: str, mode: str, symbol: str, modal: float, user_m
 async def gen_general(mode: Optional[str], msg: str, history: list) -> str:
     sys = PROMPTS.get(mode, GENERAL_PROMPT)
     msgs = [{"role":"system","content":sys}] + history[-6:] + [{"role":"user","content":msg}]
-    resp = AI.chat.completions.create(model=MODEL, messages=msgs, max_tokens=1200, temperature=0.7)
-    return resp.choices[0].message.content
+    return await asyncio.to_thread(_call_groq, msgs, 1200, 0.7)
 
 async def scan_score(exchange: str, symbol: str, mode: str) -> dict:
     try:
         mdata = await collect(exchange, symbol, mode)
-        resp = AI.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role":"system","content":AUTO_SCAN_PROMPT},
-                {"role":"user","content":f"DATA {symbol}:\n{mdata}"},
-            ],
-            max_tokens=120, temperature=0.2,
-        )
-        raw = resp.choices[0].message.content.strip().replace("```json","").replace("```","").strip()
+        msgs = [
+            {"role":"system","content":AUTO_SCAN_PROMPT},
+            {"role":"user","content":f"DATA {symbol}:\n{mdata}"},
+        ]
+        raw = await asyncio.to_thread(_call_groq, msgs, 120, 0.2)
+        raw = raw.strip().replace("```json","").replace("```","").strip()
         result = json.loads(raw)
         result["score"] = int(result.get("score",0))
         return result
@@ -1242,11 +1283,12 @@ async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token: raise RuntimeError("❌ Set TELEGRAM_BOT_TOKEN di .env")
-    if not os.getenv("GROQ_API_KEY"): raise RuntimeError("❌ Set GROQ_API_KEY di .env")
+    if not _groq_keys: raise RuntimeError("❌ Tidak ada GROQ_API_KEY ditemukan di .env")
 
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("🤖  Futures Trading Bot v4")
     print(f"🧠  AI      : {MODEL}")
+    print(f"🔑  API Keys: {len(_groq_clients)} key aktif (auto-rotate jika 429)")
     print(f"🏦  Exchange: Binance | Bybit | OKX | Gate.io | MEXC | Bitget | KuCoin")
     print("💰  Biaya AI: GRATIS ✅")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
