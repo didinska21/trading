@@ -39,6 +39,28 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════
 MODEL = "llama-3.3-70b-versatile"
 
+# ── Whitelist User ────────────────────────────────────────────
+# Isi ALLOWED_USER_IDS di .env dengan Telegram user ID
+# Format: ALLOWED_USER_IDS=123456789,987654321,111222333
+# Kosongkan = semua orang bisa akses (tidak disarankan)
+ADMIN_USERNAME = "@didinska"
+
+def _load_whitelist() -> set[int]:
+    raw = os.getenv("ALLOWED_USER_IDS", "").strip()
+    if not raw: return set()
+    ids = set()
+    for x in raw.split(","):
+        x = x.strip()
+        if x.isdigit(): ids.add(int(x))
+    return ids
+
+ALLOWED_USERS: set[int] = _load_whitelist()
+
+def is_allowed(uid: int) -> bool:
+    """Return True jika whitelist kosong (publik) atau uid terdaftar."""
+    if not ALLOWED_USERS: return True
+    return uid in ALLOWED_USERS
+
 # ── Groq Key Rotator ─────────────────────────────────────────
 # Dukung sampai 10 key: GROQ_API_KEY_1 … GROQ_API_KEY_10
 # Juga baca GROQ_API_KEY sebagai fallback key tunggal
@@ -1063,6 +1085,21 @@ def pairs_kb(pair_list: list, page=0, per=9):
 # ══════════════════════════════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
+
+    # ── Whitelist check ──────────────────────────────────────
+    if not is_allowed(u.id):
+        await update.message.reply_text(
+            f"🔒 *Akses Ditolak*\n\n"
+            f"Kamu belum terdaftar untuk menggunakan bot ini.\n\n"
+            f"Hubungi admin untuk mendaftarkan User ID kamu:\n"
+            f"👤 Telegram: *{ADMIN_USERNAME}*\n\n"
+            f"Kirim pesan ke admin dengan menyertakan User ID kamu:\n"
+            f"`{u.id}`",
+            parse_mode="Markdown"
+        )
+        logger.info(f"[BLOCKED] uid={u.id} name={u.first_name} username={u.username}")
+        return
+
     s = sess(u.id)
     s.update({"exchange":None,"mode":None,"pair":None,"modal":None,"state":"idle","history":[]})
     await update.message.reply_text(
@@ -1104,6 +1141,13 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     txt = update.message.text.strip()
     s = sess(u.id)
+
+    # ── Whitelist check ──────────────────────────────────────
+    if not is_allowed(u.id):
+        await update.message.reply_text(
+            f"🔒 Akses ditolak. Hubungi *{ADMIN_USERNAME}* untuk mendaftar.\nUser ID kamu: `{u.id}`",
+            parse_mode="Markdown")
+        return
 
     # Belum pilih exchange
     if not s["exchange"] and txt not in ("/start", "/help"):
@@ -1241,6 +1285,11 @@ async def handle_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global SCAN_INTERVAL_MIN, MIN_SCORE, SCAN_TOP_N
     q = update.callback_query; await q.answer()
     data = q.data; uid = q.from_user.id; s = sess(uid)
+
+    # ── Whitelist check ──────────────────────────────────────
+    if not is_allowed(uid):
+        await q.answer("🔒 Akses ditolak.", show_alert=True)
+        return
 
     # Pilih exchange
     if data.startswith("exch_"):
