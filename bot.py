@@ -725,9 +725,18 @@ OUTPUT FORMAT WAJIB — IKUTI PERSIS:
 🔍 Tunggu    : [jika WAIT: kondisi spesifik | jika entry: hapus baris ini]
 📋 SKENARIO ENTRY:
 🟢 Skenario LONG — jika harga turun ke $[Support] + RSI <35 + volume spike
-   → Entry $[Support] | TP1 $[nilai] (+X%) | TP2 $[nilai] (+X%) | SL $[nilai] (-X%)
+   Entry  : $[Support]
+   TP1    : $[nilai] (+X%)
+   TP2    : $[nilai] (+X%)
+   SL     : $[nilai] (-X%)
+   Syarat : RSI(14) <35, volume >1x avg
+
 🔴 Skenario SHORT — jika harga naik ke $[Resist] + RSI >65 + candle rejection
-   → Entry $[Resist] | TP1 $[nilai] (+X%) | TP2 $[nilai] (+X%) | SL $[nilai] (+X%)
+   Entry  : $[Resist]
+   TP1    : $[nilai] (-X%)
+   TP2    : $[nilai] (-X%)
+   SL     : $[nilai] (+X%)
+   Syarat : RSI(14) >65, candle rejection, volume >1x avg
 [Hapus blok SKENARIO ENTRY ini jika sudah ada sinyal entry langsung]
 📊 RSI(14/7) : [nilai] / [nilai] → [OVERSOLD 🟢 / OVERBOUGHT 🔴 / NETRAL ⚪]
 📈 MACD Hist : [nilai desimal biasa] → [BULLISH 🟢 / BEARISH 🔴]
@@ -854,9 +863,22 @@ OUTPUT FORMAT WAJIB:
 🔍 Tunggu    : [jika WAIT: kondisi spesifik | jika entry: hapus baris ini]
 📋 SKENARIO ENTRY:
 🟢 Skenario LONG — jika harga turun ke $[Support] + RSI <40 + volume normal
-   → Entry $[bawah]–$[atas] | TP1 $[nilai](+X%) | TP2 $[nilai](+X%) | TP3 $[nilai](+X%) | SL $[nilai](-X%) | R:R 1:[n]
+   Entry  : $[bawah] – $[atas]
+   TP1    : $[nilai] (+X%) → tutup 50%
+   TP2    : $[nilai] (+X%) → tutup 30%
+   TP3    : $[nilai] (+X%) → tutup 20%
+   SL     : $[nilai] (-X%)
+   R:R    : 1:[n]
+   Syarat : RSI(14) <40, volume >0.8x avg
+
 🔴 Skenario SHORT — jika harga naik ke $[Resist] + RSI >60 + rejection candle
-   → Entry $[bawah]–$[atas] | TP1 $[nilai](+X%) | TP2 $[nilai](+X%) | TP3 $[nilai](+X%) | SL $[nilai](+X%) | R:R 1:[n]
+   Entry  : $[bawah] – $[atas]
+   TP1    : $[nilai] (-X%) → tutup 50%
+   TP2    : $[nilai] (-X%) → tutup 30%
+   TP3    : $[nilai] (-X%) → tutup 20%
+   SL     : $[nilai] (+X%)
+   R:R    : 1:[n]
+   Syarat : RSI(14) >60, candle rejection, volume >0.8x avg
 [Hapus blok SKENARIO ENTRY ini jika sudah ada sinyal entry langsung]
 📊 R:R       : 1:[angka] atau ⏳ —
 📊 RSI(14/7) : [nilai] / [nilai] → [label]
@@ -989,9 +1011,22 @@ OUTPUT FORMAT WAJIB:
 🔍 Tunggu    : [jika WAIT: kondisi spesifik | jika entry: hapus baris ini]
 📋 SKENARIO ENTRY:
 🟢 Skenario LONG — jika harga turun ke $[Support] + RSI divergence + candle konfirmasi + volume spike
-   → Entry $[nilai] | TP1 $[nilai](+X%) | TP2 $[nilai](+X%) | TP3 $[nilai](+X%) | SL $[nilai](-X%) | R:R 1:[n]
+   Entry  : $[Support]
+   TP1    : $[nilai] (+X%) → tutup 40%, geser SL ke BE
+   TP2    : $[nilai] (+X%) → tutup 40%, trailing stop
+   TP3    : $[nilai] (+X%) → tutup 20%
+   SL     : $[nilai] (-X%)
+   R:R    : 1:[n] (min 1:3)
+   Syarat : RSI divergence bullish, pin bar/engulfing, volume spike
+
 🔴 Skenario SHORT — jika harga naik ke $[Resist] + RSI divergence bearish + rejection candle + volume spike
-   → Entry $[nilai] | TP1 $[nilai](+X%) | TP2 $[nilai](+X%) | TP3 $[nilai](+X%) | SL $[nilai](+X%) | R:R 1:[n]
+   Entry  : $[Resist]
+   TP1    : $[nilai] (-X%) → tutup 40%, geser SL ke BE
+   TP2    : $[nilai] (-X%) → tutup 40%, trailing stop
+   TP3    : $[nilai] (-X%) → tutup 20%
+   SL     : $[nilai] (+X%)
+   R:R    : 1:[n] (min 1:3)
+   Syarat : RSI divergence bearish, rejection candle, volume spike
 [Hapus blok SKENARIO ENTRY ini jika sudah ada sinyal entry langsung]
 📊 R:R       : 1:[angka] (min 1:3) atau ⏳ —
 📊 RSI(14/7) : [nilai] / [nilai] → [divergence/label]
