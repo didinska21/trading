@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-🤖 Telegram Futures Trading Bot v4
+🤖 Telegram Futures Trading Bot v5
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AI       : Groq llama-3.3-70b-versatile (GRATIS)
-Exchange : Binance | Bybit | OKX | Gate.io | MEXC | Bitget | KuCoin
-Mode     : High Risk | Medium Risk | Low Risk
-Extra    : Auto Signal 24 jam
+AI         : Groq llama-3.3-70b-versatile (GRATIS)
+Exchange   : Binance | Bybit | OKX | Gate.io | MEXC | Bitget | KuCoin
+Mode       : High Risk | Medium Risk | Low Risk
+Auto Signal: Scan 24 jam, notif otomatis
+Auto Trade : Full-auto execute di Binance Futures (butuh API key)
 
 SETUP:
   1. https://console.groq.com → daftar → buat API key
   2. https://t.me/BotFather → /newbot → copy token
-  3. Isi .env → jalankan: python trading_bot_v4.py
+  3. Binance → API Management → buat key dengan permission Futures Trading
+  4. Isi .env → jalankan: python trading_bot_v5.py
+
+RISIKO:
+  Auto trading menggunakan uang NYATA. Pastikan kamu paham risikonya.
+  Developer tidak bertanggung jawab atas kerugian trading.
 """
 
-import os, asyncio, logging, aiohttp, json
+import os, asyncio, logging, aiohttp, json, hmac, hashlib, time
 from datetime import datetime, timezone
 from typing import Optional
 from groq import Groq
@@ -115,6 +121,321 @@ COOLDOWN_MIN      = 60
 
 AUTO_USERS: dict[int, dict] = {}
 SESSIONS:   dict[int, dict] = {}
+
+# ══════════════════════════════════════════════════════════════
+#  BINANCE AUTO TRADING ENGINE
+# ══════════════════════════════════════════════════════════════
+BINANCE_API_KEY    = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+BINANCE_BASE       = "https://fapi.binance.com"
+
+# Risk per trade per mode (% dari available balance)
+RISK_PCT = {
+    "high_risk":   5.0,
+    "medium_risk": 3.0,
+    "low_risk":    1.0,
+}
+
+# Leverage per mode
+LEVERAGE_MAP = {
+    "high_risk":   20,
+    "medium_risk": 10,
+    "low_risk":     5,
+}
+
+# State posisi aktif: {uid: {symbol, side, entry, qty, tp_order, sl_order, mode, pnl}}
+ACTIVE_POSITIONS: dict[int, dict] = {}
+
+def _bnb_sign(params: dict) -> dict:
+    """Tambah timestamp + signature ke params Binance."""
+    params["timestamp"] = int(time.time() * 1000)
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    sig = hmac.new(BINANCE_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+    params["signature"] = sig
+    return params
+
+def _bnb_headers() -> dict:
+    return {"X-MBX-APIKEY": BINANCE_API_KEY}
+
+async def bnb_get(sess: aiohttp.ClientSession, path: str, params: dict = None) -> dict:
+    params = _bnb_sign(params or {})
+    async with sess.get(f"{BINANCE_BASE}{path}", params=params, headers=_bnb_headers()) as r:
+        data = await r.json()
+        if isinstance(data, dict) and data.get("code") and data["code"] < 0:
+            raise Exception(f"Binance GET error {data['code']}: {data.get('msg')}")
+        return data
+
+async def bnb_post(sess: aiohttp.ClientSession, path: str, params: dict) -> dict:
+    params = _bnb_sign(params)
+    async with sess.post(f"{BINANCE_BASE}{path}", params=params, headers=_bnb_headers()) as r:
+        data = await r.json()
+        if isinstance(data, dict) and data.get("code") and data["code"] < 0:
+            raise Exception(f"Binance POST error {data['code']}: {data.get('msg')}")
+        return data
+
+async def bnb_delete(sess: aiohttp.ClientSession, path: str, params: dict) -> dict:
+    params = _bnb_sign(params)
+    async with sess.delete(f"{BINANCE_BASE}{path}", params=params, headers=_bnb_headers()) as r:
+        data = await r.json()
+        return data
+
+async def get_futures_balance(sess: aiohttp.ClientSession) -> float:
+    """Ambil available balance USDT di Futures wallet."""
+    data = await bnb_get(sess, "/fapi/v2/balance")
+    for asset in data:
+        if asset.get("asset") == "USDT":
+            return float(asset.get("availableBalance", 0))
+    return 0.0
+
+async def get_symbol_info(sess: aiohttp.ClientSession, symbol: str) -> dict:
+    """Ambil info pair: tickSize, stepSize, minQty, dll."""
+    data = await sess.get(f"{BINANCE_BASE}/fapi/v1/exchangeInfo")
+    info = await data.json()
+    for s in info.get("symbols", []):
+        if s["symbol"] == symbol:
+            result = {"symbol": symbol}
+            for f in s.get("filters", []):
+                if f["filterType"] == "PRICE_FILTER":
+                    result["tickSize"] = float(f["tickSize"])
+                elif f["filterType"] == "LOT_SIZE":
+                    result["stepSize"] = float(f["stepSize"])
+                    result["minQty"]   = float(f["minQty"])
+            return result
+    raise Exception(f"Symbol {symbol} tidak ditemukan di Binance Futures")
+
+def _round_step(value: float, step: float) -> float:
+    """Round value ke step size yang valid."""
+    precision = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0
+    return round(round(value / step) * step, precision)
+
+def _round_tick(value: float, tick: float) -> float:
+    """Round harga ke tick size yang valid."""
+    precision = len(str(tick).rstrip("0").split(".")[-1]) if "." in str(tick) else 0
+    return round(round(value / tick) * tick, precision)
+
+async def set_leverage(sess: aiohttp.ClientSession, symbol: str, leverage: int):
+    """Set leverage untuk symbol."""
+    try:
+        await bnb_post(sess, "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+    except Exception as e:
+        logger.warning(f"[LEVERAGE] {symbol} leverage {leverage}x: {e}")
+
+async def get_open_position(sess: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
+    """Cek apakah ada posisi terbuka untuk symbol."""
+    data = await bnb_get(sess, "/fapi/v2/positionRisk", {"symbol": symbol})
+    for pos in data:
+        if float(pos.get("positionAmt", 0)) != 0:
+            return pos
+    return None
+
+async def cancel_all_orders(sess: aiohttp.ClientSession, symbol: str):
+    """Cancel semua open order untuk symbol."""
+    try:
+        await bnb_delete(sess, "/fapi/v1/allOpenOrders", {"symbol": symbol})
+    except Exception as e:
+        logger.warning(f"[CANCEL] {symbol}: {e}")
+
+async def execute_trade(uid: int, symbol: str, side: str, mode: str,
+                        tp_pct: float, sl_pct: float, app) -> dict:
+    """
+    Execute full trade:
+    1. Set leverage
+    2. Hitung qty dari risk % balance
+    3. Market order entry
+    4. Set TP (TAKE_PROFIT_MARKET)
+    5. Set SL (STOP_MARKET)
+    6. Simpan ke ACTIVE_POSITIONS
+    """
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        raise Exception("BINANCE_API_KEY / BINANCE_API_SECRET belum diset di .env")
+
+    leverage  = LEVERAGE_MAP[mode]
+    risk_pct  = RISK_PCT[mode] / 100
+
+    async with aiohttp.ClientSession() as sess:
+        # 1. Balance
+        balance = await get_futures_balance(sess)
+        if balance < 1:
+            raise Exception(f"Balance tidak cukup: ${balance:.2f}")
+
+        # 2. Info symbol
+        info = await get_symbol_info(sess, symbol)
+        tick = info.get("tickSize", 0.0001)
+        step = info.get("stepSize", 0.001)
+
+        # 3. Harga sekarang
+        ticker = await sess.get(f"{BINANCE_BASE}/fapi/v1/ticker/price?symbol={symbol}")
+        price  = float((await ticker.json())["price"])
+
+        # 4. Hitung qty
+        risk_usdt  = balance * risk_pct
+        notional   = risk_usdt * leverage
+        qty        = _round_step(notional / price, step)
+        if qty < info.get("minQty", 0.001):
+            raise Exception(f"Qty terlalu kecil: {qty} (min {info.get('minQty')}). Tambah balance atau kurangi leverage.")
+
+        # 5. Set leverage
+        await set_leverage(sess, symbol, leverage)
+
+        # 6. Hitung TP & SL harga
+        if side == "BUY":   # LONG
+            tp_price = _round_tick(price * (1 + tp_pct/100), tick)
+            sl_price = _round_tick(price * (1 - sl_pct/100), tick)
+            tp_side  = "SELL"
+            sl_side  = "SELL"
+        else:               # SHORT
+            tp_price = _round_tick(price * (1 - tp_pct/100), tick)
+            sl_price = _round_tick(price * (1 + sl_pct/100), tick)
+            tp_side  = "BUY"
+            sl_side  = "BUY"
+
+        # 7. Market order
+        entry_order = await bnb_post(sess, "/fapi/v1/order", {
+            "symbol":   symbol,
+            "side":     side,
+            "type":     "MARKET",
+            "quantity": qty,
+        })
+        entry_id = entry_order.get("orderId")
+        logger.info(f"[TRADE] Entry {side} {symbol} qty={qty} price={price} orderId={entry_id}")
+
+        # 8. TP order
+        tp_order = await bnb_post(sess, "/fapi/v1/order", {
+            "symbol":          symbol,
+            "side":            tp_side,
+            "type":            "TAKE_PROFIT_MARKET",
+            "stopPrice":       tp_price,
+            "closePosition":   "true",
+            "timeInForce":     "GTE_GTC",
+        })
+
+        # 9. SL order
+        sl_order = await bnb_post(sess, "/fapi/v1/order", {
+            "symbol":          symbol,
+            "side":            sl_side,
+            "type":            "STOP_MARKET",
+            "stopPrice":       sl_price,
+            "closePosition":   "true",
+            "timeInForce":     "GTE_GTC",
+        })
+
+        result = {
+            "symbol":    symbol,
+            "side":      side,
+            "entry":     price,
+            "qty":       qty,
+            "leverage":  leverage,
+            "tp_price":  tp_price,
+            "sl_price":  sl_price,
+            "tp_pct":    tp_pct,
+            "sl_pct":    sl_pct,
+            "mode":      mode,
+            "balance":   balance,
+            "risk_usdt": risk_usdt,
+            "notional":  notional,
+            "entry_id":  entry_id,
+            "tp_id":     tp_order.get("orderId"),
+            "sl_id":     sl_order.get("orderId"),
+            "open_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        }
+        ACTIVE_POSITIONS[uid] = result
+        return result
+
+async def close_position(uid: int, symbol: str, reason: str = "manual") -> dict:
+    """Close posisi terbuka dan cancel semua order."""
+    async with aiohttp.ClientSession() as sess:
+        pos = await get_open_position(sess, symbol)
+        if not pos:
+            ACTIVE_POSITIONS.pop(uid, None)
+            return {"status": "no_position"}
+
+        amt  = float(pos["positionAmt"])
+        side = "SELL" if amt > 0 else "BUY"
+        qty  = abs(amt)
+
+        await cancel_all_orders(sess, symbol)
+        close_order = await bnb_post(sess, "/fapi/v1/order", {
+            "symbol":           symbol,
+            "side":             side,
+            "type":             "MARKET",
+            "quantity":         qty,
+            "reduceOnly":       "true",
+        })
+
+        entry_info = ACTIVE_POSITIONS.pop(uid, {})
+        pnl = float(pos.get("unRealizedProfit", 0))
+        logger.info(f"[CLOSE] {symbol} reason={reason} pnl={pnl}")
+        return {
+            "status":  "closed",
+            "symbol":  symbol,
+            "pnl":     pnl,
+            "reason":  reason,
+            "entry":   entry_info.get("entry", 0),
+            "close_id": close_order.get("orderId"),
+        }
+
+async def monitor_positions(uid: int, app):
+    """
+    Monitor posisi aktif tiap 60 detik.
+    Auto close jika:
+    - Posisi sudah tidak ada (kena TP/SL)
+    - Sinyal AI berubah arah
+    """
+    logger.info(f"[MONITOR] Start uid={uid}")
+    while True:
+        try:
+            pos_info = ACTIVE_POSITIONS.get(uid)
+            if not pos_info:
+                logger.info(f"[MONITOR] uid={uid} tidak ada posisi aktif, stop monitor")
+                break
+
+            symbol = pos_info["symbol"]
+            mode   = pos_info["mode"]
+            side   = pos_info["side"]
+
+            async with aiohttp.ClientSession() as sess:
+                pos = await get_open_position(sess, symbol)
+
+            # Posisi sudah tidak ada (kena TP atau SL)
+            if not pos:
+                entry   = pos_info.get("entry", 0)
+                tp_p    = pos_info.get("tp_price", 0)
+                sl_p    = pos_info.get("sl_price", 0)
+                ACTIVE_POSITIONS.pop(uid, None)
+
+                # Ambil harga sekarang untuk estimasi PnL
+                async with aiohttp.ClientSession() as sess:
+                    ticker = await sess.get(f"{BINANCE_BASE}/fapi/v1/ticker/price?symbol={symbol}")
+                    cur    = float((await ticker.json())["price"])
+
+                if side == "BUY":
+                    hit_tp = cur >= tp_p
+                else:
+                    hit_tp = cur <= tp_p
+
+                status  = "✅ TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
+                notif = (
+                    f"{'✅' if hit_tp else '🛑'} *POSISI DITUTUP*\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 Pair   : {symbol}\n"
+                    f"🎯 Status : {status}\n"
+                    f"⚡ Entry  : ${entry}\n"
+                    f"📍 Close  : ${cur}\n"
+                    f"🏹 Lev    : {pos_info.get('leverage')}x\n"
+                    f"💰 Notional: ${pos_info.get('notional',0):.2f}"
+                )
+                try:
+                    await app.bot.send_message(uid, notif, parse_mode="Markdown")
+                except: pass
+                break
+
+            await asyncio.sleep(60)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[MONITOR] Error: {e}")
+            await asyncio.sleep(60)
 
 # ══════════════════════════════════════════════════════════════
 #  EXCHANGE REGISTRY — semua public API, no key needed
@@ -1162,10 +1483,18 @@ async def auto_signal_loop(uid: int, app):
             info = AUTO_USERS.get(uid)
             if not info or not info.get("active"): break
 
-            exchange = info["exchange"]
-            mode     = info["mode"]
-            modal    = info["modal"]
-            now      = datetime.now(timezone.utc)
+            exchange    = info["exchange"]
+            mode        = info["mode"]
+            modal       = info["modal"]
+            auto_trade  = info.get("auto_trade", False)
+            now         = datetime.now(timezone.utc)
+
+            # Jika ada posisi aktif, skip scan — tunggu posisi selesai
+            if auto_trade and uid in ACTIVE_POSITIONS:
+                pos = ACTIVE_POSITIONS[uid]
+                logger.info(f"[AUTO] uid={uid} posisi aktif di {pos['symbol']}, skip scan")
+                await asyncio.sleep(SCAN_INTERVAL_MIN * 60)
+                continue
 
             async with aiohttp.ClientSession() as sess:
                 try:
@@ -1186,11 +1515,13 @@ async def auto_signal_loop(uid: int, app):
                 last = info.get("last_sent",{}).get(symbol)
                 if last and (now-last).total_seconds()/60 < COOLDOWN_MIN:
                     continue
+
                 result = await scan_score(exchange, symbol, mode)
-                score  = result.get("score",0)
-                arah   = result.get("arah","?")
-                alasan = result.get("alasan","")
-                logger.info(f"[AUTO] {symbol} score={score}")
+                score  = result.get("score", 0)
+                arah   = result.get("arah", "?")
+                alasan = result.get("alasan", "")
+                logger.info(f"[AUTO] {symbol} score={score} arah={arah}")
+
                 if score >= MIN_SCORE:
                     try:
                         sinyal = await gen_signal(exchange, mode, symbol, modal,
@@ -1208,11 +1539,60 @@ async def auto_signal_loop(uid: int, app):
                         )
                         await app.bot.send_message(uid, notif, parse_mode="Markdown")
                         await app.bot.send_message(uid, sinyal, parse_mode="Markdown")
+
+                        # ── AUTO TRADE EXECUTE ────────────────────────
+                        if auto_trade and exchange == "binance" and arah in ("LONG","SHORT"):
+                            # Hanya execute jika belum ada posisi aktif
+                            if uid not in ACTIVE_POSITIONS:
+                                side   = "BUY" if arah == "LONG" else "SELL"
+                                tp_pct = 4.0 if mode == "high_risk" else 3.0 if mode == "medium_risk" else 2.0
+                                sl_pct = 2.0 if mode == "high_risk" else 1.5 if mode == "medium_risk" else 1.0
+                                try:
+                                    await app.bot.send_message(uid,
+                                        f"⚡ *AUTO TRADE EXECUTING...*\n"
+                                        f"📌 {symbol} | {arah} | {LEVERAGE_MAP[mode]}x\n"
+                                        f"⏳ Mengirim order ke Binance...",
+                                        parse_mode="Markdown")
+
+                                    trade = await execute_trade(uid, symbol, side, mode, tp_pct, sl_pct, app)
+
+                                    trade_notif = (
+                                        f"✅ *ORDER MASUK!*\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"📌 Pair     : *{symbol}*\n"
+                                        f"🎯 Arah     : *{arah}*\n"
+                                        f"⚡ Entry    : ${trade['entry']}\n"
+                                        f"🏹 Leverage : {trade['leverage']}x\n"
+                                        f"📦 Qty      : {trade['qty']}\n"
+                                        f"💰 Notional : ${trade['notional']:.2f}\n"
+                                        f"✅ TP       : ${trade['tp_price']} (+{tp_pct}%)\n"
+                                        f"🛑 SL       : ${trade['sl_price']} (-{sl_pct}%)\n"
+                                        f"💼 Risk     : ${trade['risk_usdt']:.2f} ({RISK_PCT[mode]}% balance)\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🕐 {trade['open_time']}"
+                                    )
+                                    await app.bot.send_message(uid, trade_notif, parse_mode="Markdown")
+
+                                    # Start monitor task
+                                    asyncio.create_task(monitor_positions(uid, app))
+
+                                except Exception as te:
+                                    await app.bot.send_message(uid,
+                                        f"❌ *AUTO TRADE GAGAL*\n`{te}`",
+                                        parse_mode="Markdown")
+                                    logger.error(f"[TRADE] Execute error: {te}")
+
                         if "last_sent" not in info: info["last_sent"] = {}
                         info["last_sent"][symbol] = now
                         AUTO_USERS[uid] = info
+
+                        # Jika auto trade aktif dan sudah execute, stop scan pair lain
+                        if auto_trade and uid in ACTIVE_POSITIONS:
+                            break
+
                     except Exception as e:
-                        logger.error(f"[AUTO] Gagal kirim: {e}")
+                        logger.error(f"[AUTO] Gagal kirim/execute: {e}")
+
                 await asyncio.sleep(3)
 
             logger.info(f"[AUTO] Selesai, tunggu {SCAN_INTERVAL_MIN} menit")
@@ -1324,9 +1704,172 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Bukan liquidation otomatis — kamu yang pasang manual di exchange.\n\n"
         "*Auto Signal:*\n"
         "Bot scan pairs otomatis, kirim notif kalau ada setup bagus (score ≥7/10)\n\n"
+        "*Auto Trading:*\n"
+        "/autotrade on → aktifkan auto trading (butuh Binance API key)\n"
+        "/autotrade off → matikan auto trading\n"
+        "/posisi → lihat posisi aktif\n"
+        "/closeposisi → tutup posisi sekarang\n\n"
+        "⚠️ Auto trade menggunakan uang NYATA. Pastikan API key sudah diset di .env\n\n"
         "/start → reset & ganti exchange",
         parse_mode="Markdown"
     )
+
+async def cmd_autotrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u  = update.effective_user
+    if not is_allowed(u.id):
+        await update.message.reply_text("⛔ Akses ditolak."); return
+
+    args = ctx.args
+    if not args:
+        status = "🟢 ON" if AUTO_USERS.get(u.id, {}).get("auto_trade") else "🔴 OFF"
+        await update.message.reply_text(
+            f"🤖 *AUTO TRADING*\n\nStatus: {status}\n\n"
+            f"Gunakan:\n`/autotrade on` — aktifkan\n`/autotrade off` — matikan",
+            parse_mode="Markdown"); return
+
+    cmd = args[0].lower()
+
+    if cmd == "on":
+        if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+            await update.message.reply_text(
+                "❌ *BINANCE_API_KEY / BINANCE_API_SECRET belum diset!*\n\n"
+                "Tambahkan ke `.env`:\n"
+                "```\nBINANCE_API_KEY=xxx\nBINANCE_API_SECRET=xxx\n```\n\n"
+                "Restart bot setelah mengisi .env",
+                parse_mode="Markdown"); return
+
+        info = AUTO_USERS.get(u.id)
+        if not info or not info.get("active"):
+            await update.message.reply_text(
+                "⚠️ *Auto Signal belum aktif!*\n\n"
+                "Aktifkan dulu Auto Signal via menu 🤖 AUTO SIGNAL, "
+                "kemudian ketik `/autotrade on` lagi.",
+                parse_mode="Markdown"); return
+
+        AUTO_USERS[u.id]["auto_trade"] = True
+        mode    = info.get("mode","high_risk")
+        risk    = RISK_PCT[mode]
+        lev     = LEVERAGE_MAP[mode]
+
+        # Test koneksi Binance
+        try:
+            async with aiohttp.ClientSession() as sess:
+                bal = await get_futures_balance(sess)
+            bal_txt = f"${bal:.2f} USDT"
+        except Exception as e:
+            bal_txt = f"❌ Gagal cek balance: {e}"
+
+        await update.message.reply_text(
+            f"✅ *AUTO TRADING AKTIF!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏦 Exchange  : Binance Futures\n"
+            f"📊 Mode      : {mode.replace('_',' ').title()}\n"
+            f"🏹 Leverage  : {lev}x\n"
+            f"💼 Risk/trade: {risk}% balance\n"
+            f"💰 Balance   : {bal_txt}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ Bot akan auto execute saat score ≥ {MIN_SCORE}/10\n"
+            f"📲 Notif masuk setiap ada order buka/tutup\n"
+            f"⚠️ Max 1 posisi bersamaan\n\n"
+            f"Ketik `/autotrade off` untuk matikan",
+            parse_mode="Markdown")
+
+    elif cmd == "off":
+        if u.id in AUTO_USERS:
+            AUTO_USERS[u.id]["auto_trade"] = False
+        await update.message.reply_text(
+            "🔴 *AUTO TRADING DIMATIKAN*\n\n"
+            "Bot tidak akan execute order baru.\n"
+            "Posisi yang sudah terbuka tetap berjalan.\n"
+            "Gunakan /closeposisi untuk tutup posisi manual.",
+            parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Gunakan: `/autotrade on` atau `/autotrade off`", parse_mode="Markdown")
+
+async def cmd_posisi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    if not is_allowed(u.id):
+        await update.message.reply_text("⛔ Akses ditolak."); return
+
+    pos = ACTIVE_POSITIONS.get(u.id)
+    if not pos:
+        # Cek langsung ke Binance juga
+        if BINANCE_API_KEY:
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    data = await bnb_get(sess, "/fapi/v2/positionRisk", {})
+                open_pos = [p for p in data if float(p.get("positionAmt",0)) != 0]
+                if open_pos:
+                    lines = ["📊 *POSISI TERBUKA DI BINANCE:*\n"]
+                    for p in open_pos:
+                        pnl = float(p.get("unRealizedProfit",0))
+                        lines.append(
+                            f"📌 {p['symbol']}\n"
+                            f"   Qty   : {p['positionAmt']}\n"
+                            f"   Entry : ${float(p['entryPrice']):.4f}\n"
+                            f"   PnL   : ${pnl:+.2f}\n"
+                        )
+                    await update.message.reply_text("\n".join(lines), parse_mode="Markdown"); return
+            except Exception as e:
+                pass
+        await update.message.reply_text("📭 Tidak ada posisi aktif saat ini."); return
+
+    pnl_txt = ""
+    if BINANCE_API_KEY:
+        try:
+            async with aiohttp.ClientSession() as sess:
+                data = await bnb_get(sess, "/fapi/v2/positionRisk", {"symbol": pos["symbol"]})
+            for p in data:
+                if float(p.get("positionAmt",0)) != 0:
+                    pnl_txt = f"\n💹 Unrealized PnL: *${float(p['unRealizedProfit']):+.2f}*"
+        except: pass
+
+    arah = "LONG 🟢" if pos["side"] == "BUY" else "SHORT 🔴"
+    await update.message.reply_text(
+        f"📊 *POSISI AKTIF*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Pair     : *{pos['symbol']}*\n"
+        f"🎯 Arah     : {arah}\n"
+        f"⚡ Entry    : ${pos['entry']}\n"
+        f"🏹 Leverage : {pos['leverage']}x\n"
+        f"📦 Qty      : {pos['qty']}\n"
+        f"💰 Notional : ${pos['notional']:.2f}\n"
+        f"✅ TP       : ${pos['tp_price']} (+{pos['tp_pct']}%)\n"
+        f"🛑 SL       : ${pos['sl_price']} (-{pos['sl_pct']}%)\n"
+        f"🕐 Buka     : {pos['open_time']}"
+        f"{pnl_txt}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Gunakan /closeposisi untuk tutup manual",
+        parse_mode="Markdown")
+
+async def cmd_closeposisi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    if not is_allowed(u.id):
+        await update.message.reply_text("⛔ Akses ditolak."); return
+
+    pos = ACTIVE_POSITIONS.get(u.id)
+    if not pos:
+        await update.message.reply_text("📭 Tidak ada posisi aktif untuk ditutup."); return
+
+    await update.message.reply_text(
+        f"⏳ Menutup posisi *{pos['symbol']}*...", parse_mode="Markdown")
+    try:
+        result = await close_position(u.id, pos["symbol"], reason="manual")
+        if result["status"] == "closed":
+            pnl = result.get("pnl", 0)
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            await update.message.reply_text(
+                f"✅ *POSISI DITUTUP (MANUAL)*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 Pair  : *{result['symbol']}*\n"
+                f"⚡ Entry : ${result['entry']}\n"
+                f"{emoji} PnL   : *${pnl:+.2f}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━",
+                parse_mode="Markdown")
+        else:
+            await update.message.reply_text("ℹ️ Posisi tidak ditemukan di exchange.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Gagal close posisi: `{e}`", parse_mode="Markdown")
 
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -1526,16 +2069,20 @@ def main():
     if not _groq_keys: raise RuntimeError("❌ Tidak ada GROQ_API_KEY ditemukan di .env")
 
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("🤖  Futures Trading Bot v4")
+    print("🤖  Futures Trading Bot v5")
     print(f"🧠  AI      : {MODEL}")
     print(f"🔑  API Keys: {len(_groq_clients)} key aktif (auto-rotate jika 429)")
     print(f"🏦  Exchange: Binance | Bybit | OKX | Gate.io | MEXC | Bitget | KuCoin")
+    print(f"⚡  AutoTrade: {'✅ Siap (Binance API key ditemukan)' if BINANCE_API_KEY else '⚠️  Tidak aktif (BINANCE_API_KEY belum diset)'}")
     print("💰  Biaya AI: GRATIS ✅")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     app = Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help",  cmd_help))
+    app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("help",         cmd_help))
+    app.add_handler(CommandHandler("autotrade",    cmd_autotrade))
+    app.add_handler(CommandHandler("posisi",       cmd_posisi))
+    app.add_handler(CommandHandler("closeposisi",  cmd_closeposisi))
     app.add_handler(CallbackQueryHandler(handle_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
